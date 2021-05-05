@@ -1,0 +1,246 @@
+---
+title: "COVID-19 Data Exploration"
+author: "Yunan Zhao"
+date: "Due 11/23/2020 by 11:59pm EST"
+output: html_document
+---
+
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(zoo)
+library(maps)
+library(stringr)
+```
+
+Novel coronavirus disease 2019 (COVID-19) is caused by severe acute respiratory syndrome coronavirus 2 (SARS-CoV-2) and was first identified in Wuhan, Hubei, China, in late 2019. This highly infectious disease quickly spread throughout the world, and on March 11, 2020, the World Health Organization (WHO) officially recognized COVID-19 as a pandemic [[source]](https://www.who.int/news-room/detail/29-06-2020-covidtimeline). At the time of this writing, there is no known vaccine or specific antiviral treatment, and many aspects of the nature of COVID-19 remain unknown. The pandemic and the lockdown measures implemented in response to it have caused global social and economic disruption. More than ever, knowing how to appropriately interpret data is a vital component of understanding disease spread and making public health decisions.  
+
+The Center for Systems Science and Engineering at Johns Hopkins was among the earliest to collect and publish global data related to the COVID-19 pandemic. The data used for their [reporting dashboard](https://coronavirus.jhu.edu/map.html), aggregated from multiple sources and updated daily, is freely available on [Github](https://github.com/CSSEGISandData/COVID-19). Several different datasets are available, but for this question, we will consider the daily time series summary table for globally confirmed cases. The file provided for you contains data through October 31, 2020. 
+
+```{r, message=FALSE}
+# Read in Johns Hopkins global data for confirmed cases of COVID-19
+# Source: 
+# https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv
+jhu = read_csv("time_series_covid19_confirmed_global.csv")
+```
+
+
+Reshape the Johns Hopkins data to long format, so that instead of having many columns of cases (each one corresponding to a different date)
+
+```{r}
+long_jhu <- jhu %>%
+   gather(date, cases, `1/22/20`:`10/31/20`) 
+date <- mdy(long_jhu$date)
+long_jhu$date <- date
+str(long_jhu)
+```
+
+This dataset keeps track of the number of confirmed cases reported for states, provinces, and other sub-regions within a given country. We would like to only look at the overall number of cases in each country, so create a new data frame with three columns: country name, date, and the total number of cases in the country on that day.  
+
+```{r}
+tab1 <- long_jhu[, 2]
+tab2 <- long_jhu[, 5:6]
+new_jhu <- bind_cols(tab1, tab2)
+names(new_jhu)[1] <- "Country"
+new_jhu <- new_jhu %>%
+   group_by(Country, date) %>%
+   summarize(cases = sum(cases, na.rm = TRUE))
+head(new_jhu)
+
+countries <- c("China", "Colombia", "Germany", "Nigeria", "US")
+new_jhu %>% filter(Country %in% countries) %>%
+   ggplot(aes(x = date, y = cases, color = Country)) + 
+   geom_line() +
+   xlab("Date") + 
+   ylab("Number of Confirmed Cases") +
+   ggtitle("Global Data of the COVID-19 Pandemic")
+
+# According to the plot, we can see that the number of confirmed cases in the United States is far more than other countries.
+```
+
+
+The number of cases varies greatly between these five countries. Transforming the data can make it easier to interpret time series plot. In this scenario, because we are primarily concerned with observing general trends, it isn't too worrisome and you can ignore the message. We could have considered an alternative transformation that is defined at zero, such as the square root, but logs have a nice interpretation. We also could have done a "pseudo-log" transformation by replacing the undefined values with zeros, or by transforming the data as log(x+1) instead of log(x). 
+
+```{r}
+new_jhu %>% filter(Country %in% countries) %>%
+   ggplot(aes(x = date, y = cases+1, color = Country)) + 
+   geom_line() +
+   scale_y_log10() +
+   xlab("Date") + 
+   ylab("Number of Confirmed Cases (log scale)") +
+   ggtitle("Global Data of the COVID-19 Pandemic")
+
+
+## Based on the new plot, it is easier to compare what's going on among selected countries. The United States has relatively more confirmed cases, and Nigeria has relatively less confirmed cases among selected countries.
+
+```
+
+
+The high amount of day-to-day fluctuation in the number of new cases makes it difficult to interpret plots involving this variable. Many public dashboards and reporting tools prefer to look at seven-day rolling averages. For this assignment, we will define the seven-day rolling average of new cases as the average of the new cases reported on a given day, the three days before, and the three days after. It's a "rolling" average because the window of seven days moves along as you calculate the averages for new dates. 
+   
+    ```{r}
+    cases = c(13, 15, 18, 22, 29, 39, 59, 61, 62, 67, 74, 89, 108, 122)
+    new_cases = cases - lag(cases)
+    new_cases
+    ```
+
+    ```{r}
+    new_cases_7dayavg = rollmean(new_cases, k = 7, fill = NA)
+    new_cases_7dayavg
+    ```
+
+
+```{r}
+new_jhu <- new_jhu %>%
+   mutate(new_cases = cases - lag(cases)) %>%
+   mutate(new_cases_7dayavg = rollmean(new_cases, k = 7, fill = NA))
+
+new_jhu %>%
+   filter(Country %in% countries) %>%
+   ggplot(aes(x = date, y = new_cases_7dayavg, color = Country)) + 
+   geom_line() +
+   xlab("Date") + 
+   ylab("Seven-day Rolling Average of New Cases") +
+   ggtitle("Global Data of the COVID-19 Pandemic")
+
+```
+
+
+Instead of looking at the raw counts of new cases, perhaps it would be more informative to look at new cases per capita. To do that, we will need to use the country populations from the Johns Hopkins UID lookup table. The country-level populations are stored in the observations where `Province_State` is NA. (The observations where `Province_State` is not NA correspond to provinces, states, and other sub-regions within a country.)
+
+    ```{r}
+    # Read in Johns Hopkins UID lookup table
+    # Source: https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv
+    uid_lookup_table = read_csv("UID_ISO_FIPS_LookUp_Table.csv")
+    ```
+
+   Merge the country-level Johns Hopkins data frame with the country-level populations from the UID lookup table. Then, using the seven-day rolling average of new cases and the country populations, create a new variable that calculates the seven-day rolling average of new cases per million. Plot the seven-day rolling average of new cases per million against date for China, Colombia, Germany, Nigeria, and the United States. 
+
+```{r}
+
+uid_lookup_table2 <- uid_lookup_table %>% 
+        select(Combined_Key, Population)
+names(uid_lookup_table2)[1] <- "Country"
+new_jhu <- left_join(new_jhu, uid_lookup_table2, by = "Country")
+
+new_jhu <- new_jhu %>%
+   mutate(permillion = new_cases_7dayavg/(Population/10^6))
+
+new_jhu %>%
+   filter(Country %in% countries) %>%
+   ggplot(aes(x = date, y = permillion, color = Country)) + 
+   geom_line() +
+   xlab("Date") + 
+   ylab("Seven-day Rolling Average per million") +
+   ggtitle("Global Data of the COVID-19 Pandemic")
+
+```
+
+
+Create a Shiny app that allows the user to select a variable (the seven-day rolling average of either new cases or new cases per million) and up to six countries to plot. Based on these user inputs, display a line plot of the selected variable vs. date, for the selected countries.
+
+   Then, add a widget that allows the user to select a date from the range of dates in the Johns Hopkins data. Also, print a table that lists the selected countries, as well as the seven-day rolling average of the number of new cases and new cases per million for these countries, on the selected date. (Both new cases and new cases per million should always be printed by the table, regardless of which variable was selected by the user.)
+
+```{r}
+ ##  By using the Shiny app, Mar.31st is the date when the United States and Italy had about the same seven-day rolling average of new cases per million in the spring. On this day, the US had 25015.71 seven-day rolling average of new cases, which is about 5 times more than Italy's seven day rolling average of new cases 4761.29. In addition, the number of new cases of the US on this day is 26368 from the jhu dataset, which is also about 5 times more than Italy's number of new cases 4053.
+
+```
+
+
+ In the basic example below, `world_map` contains latitude and longitude information that can be used by `geom_polygon` to draw the outlines of the countries in a world map
+
+    ```{r, fig.width=8}
+    # Pull out world map data frame
+    world_map = map_data("world")
+    
+    # Basic example of a map
+    ggplot(world_map, aes(x = long, y = lat, group = group)) +
+      geom_polygon(fill="gray", color = "white") + 
+      theme(panel.grid.major = element_blank(), 
+            panel.background = element_blank(),
+            axis.title = element_blank(), 
+            axis.text = element_blank(),
+            axis.ticks = element_blank())
+    ```
+
+   Create a heatmap of the world with the countries colored according to the seven-day rolling average of new cases per million on August 1, 2020. To do this, first filter the country-level Johns Hopkins dataset to only include observations from this date. Then, merge the Johns Hopkins data frame with the world map data frame. Before merging, you will need to recode several of the country names to get them to match in both data frames. Finally, fill in the countries in the heatmap with a sensible choice of bins and colors. 
+   
+    ```{r}
+    # Key for discrepant country names in Johns Hopkins and world map data
+    country_key = data.frame(rbind(c("Antigua and Barbuda", "Antigua"), 
+                                   c("Burma", "Myanmar"), 
+                                   c("Cabo Verde", "Cape Verde"), 
+                                   c("Congo (Kinshasa)", 
+                                     "Democratic Republic of the Congo"), 
+                                   c("Congo (Brazzaville)", 
+                                     "Republic of Congo"), 
+                                   c("Cote d'Ivoire", "Ivory Coast"), 
+                                   c("Czechia", "Czech Republic"), 
+                                   c("Eswatini", "Swaziland"), 
+                                   c("Holy See", "Vatican"), 
+                                   c("Korea, South", "South Korea"), 
+                                   c("North Macedonia", "Macedonia"), 
+                                   c("Saint Kitts and Nevis", "Saint Kitts"), 
+                                   c("Saint Vincent and the Grenadines", 
+                                     "Saint Vincent"), 
+                                   c("Taiwan*", "Taiwan"), 
+                                   c("Trinidad and Tobago", "Trinidad"), 
+                                   c("United Kingdom", "UK"), 
+                                   c("US", "USA")))
+    names(country_key) = c("JHU", "map")
+    ```
+
+
+```{r}
+world_map <- map_data("world")
+
+# Filtering the Johns Hopkins data by date before merging it with the world map data 
+# Recoding the country names
+heat <- new_jhu %>% filter(date == "2020-08-01" ) %>%
+   mutate(Country = recode(Country,
+                           `Antigua and Barbuda` = "Antigua", 
+                           `Burma` = "Myanmar",
+                           `Cabo Verde` = "Cape Verde", 
+                           `Congo (Kinshasa)` = "Democratic Republic of the Congo", 
+                           `Congo (Brazzaville)` = "Republic of Congo", 
+                           `Cote d'Ivoire` = "Ivory Coast",
+                           `Czechia` = "Czech Republic", 
+                           `Eswatini` = "Swaziland", 
+                           `Holy See` = "Vatican", 
+                           `Korea, South` = "South Korea", 
+                           `North Macedonia` = "Macedonia", 
+                           `Saint Kitts and Nevis` = "Saint Kitts", 
+                           `Saint Vincent and the Grenadines` = "Saint Vincent", 
+                           `Taiwan*` = "Taiwan", 
+                           `Trinidad and Tobago` = "Trinidad", 
+                           `United Kingdom` = "UK", 
+                           `US` = "USA"
+                           ))
+names(heat)[1] <- "region"
+
+full_data <-  inner_join(heat, world_map, by = "region")
+
+    
+# Basic example of a map
+full_data %>% ggplot(aes(x = long, y = lat, group = group, fill= new_cases_7dayavg)) +
+   geom_polygon(colour = "white") +
+   scale_fill_viridis_c(name = "New cases(7day-avg)") +
+   theme(panel.grid.major = element_blank(), 
+         panel.background = element_blank(),
+         axis.title = element_blank(), 
+         axis.text = element_blank(),
+         axis.ticks = element_blank()) +
+   coord_fixed(1.2) +
+   facet_grid(~ date)
+
+```
+
+
+Update  Shiny app from so that it also displays a heatmap of the user-selected variable (seven-day rolling average of new cases or new cases per million) on the user-selected date. The heatmaps will look weird and gray when the earliest or latest dates are selected, because the seven-day rolling averages are set to NA for these dates. 
+
+```{r}
+## By using the Shiny app, the three contries with the highest seven-day rolling average on September 1, 2020 is India, US, and Brazil. The number of new cases are 78357, 42534, and 42659 respectively. It does visually appear moroe serious than other countries at the dame time.
+```
+
