@@ -1,0 +1,214 @@
+---
+title: "BST263_FinalProject"
+author: "Yunan Zhao"
+date: "5/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+library(DT)
+library(mice) # to locate missing value
+library(caret)
+library(MASS)
+library(gbm)
+```
+
+##### Load the data and split into a training and test set.
+```{r}
+library(readxl)
+distress <- read_excel("Dataset.xlsx")
+head(distress)
+# Reshape the variable PHQ9 to a binary indicator
+distress$PHQ9[distress$PHQ9 < 10] <- 0
+distress$PHQ9[distress$PHQ9 != 0] <- 1
+# Reshape the variable LSNS-6 to a binary indicator
+distress$LSNS6[distress$LSNS6 >= 12] <- 0
+distress$LSNS6[distress$LSNS6 != 0] <- 1
+# Reshape the variable K6 to a binary indicator
+distress$K6[distress$K6 < 13] <- 0
+distress$K6[distress$K6 != 0] <- 1
+
+# Split the data into training and test set
+trainset = distress[1:floor(nrow(distress)*0.8),]
+testset = distress[-(1:floor(nrow(distress)*0.8)),]
+str(distress)
+names(distress)
+```
+
+##### Before examining data analysis, we would like to deal with the missing values in our dataset.
+```{r}
+sum(is.na(distress))
+sum(is.na(trainset))
+sum(is.na(testset))
+miss <- md.pattern(distress, rotate.name = TRUE)
+
+```
+
+## LDA Method
+```{r }
+lda_PHQ9 <- lda(PHQ9 ~ . -K6 -LSNS6 -UCLA_LS3 -Income -ID -Age, data = trainset)
+lda_preds_PHQ9 <- predict(lda_PHQ9, testset)
+confusionMatrix(data = as.factor(lda_preds_PHQ9$class), reference = as.factor(testset$PHQ9))
+```
+```{r}
+lda_LSNS6 <- lda(LSNS6 ~ . -K6 -PHQ9 -UCLA_LS3 -Income -ID-Age, data = trainset)
+lda_preds_LSNS6 <- predict(lda_LSNS6, testset)
+confusionMatrix(data = as.factor(lda_preds_LSNS6$class), reference = as.factor(testset$LSNS6))
+```
+```{r}
+lda_K6 <- lda(K6 ~ . -PHQ9 -LSNS6 -UCLA_LS3 -Income -ID-Age, data = trainset)
+lda_preds_K6 <- predict(lda_K6, testset)
+confusionMatrix(data = as.factor(lda_preds_K6$class), reference = as.factor(testset$K6))
+```
+
+## Boosting Method
+```{r}
+dim(distress)
+set.seed(1)
+
+  # Gradient boosted trees in the gbm package
+  # Defaults:
+  #   n.trees = 100 (number of stages to use)
+  #   interaction.depth = 1 (stumps)
+  #   shrinkage = 0.001
+  #   bag.fraction = 0.5 (stochastic boosting using 50% of data at each stage)
+
+boost_PHQ9 = gbm(PHQ9~.-K6 -LSNS6 -UCLA_LS3 -Income -ID-Age, data=distress,
+                 distribution="gaussian", train.fraction = .8,
+                 n.trees=1000, interaction.depth=2)
+gbm.perf(boost_PHQ9)
+summary(boost_PHQ9)
+
+```
+
+#### Do boosting for PHQ9
+```{r}
+# instead of doing full CV to estimate tuning parameters (which would take a lot of time)
+# let's just use a single train/test split for demo
+
+# first create a grid of values to loop through
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  ## lambda
+  shrinkage = c(.00001,.001,.01, .1, .3),
+  ## tree depth
+  interaction.depth = c(1, 3, 5),
+  # a place to store RMSEs from different models
+  min_RMSE = 0,  
+  # a place to store the number of trees that gives minimal RMSE
+  best_ntrees=0
+)
+
+# total number of tuning parameter combinations
+nrow(hyper_grid)
+
+# loop through all combos of hyperparameters
+# this will take a minute or two to run
+for(i in 1:nrow(hyper_grid)) {
+  
+  # reproducibility
+  set.seed(123)
+  
+  # train model
+  gbm.PHQ9 <- gbm(
+    formula = PHQ9~.-K6 -LSNS6 -UCLA_LS3 -Income -ID-Age,
+    distribution = "gaussian",
+    data = distress,
+    ## specify a maximum number of trees and we can evaluate model fit at each iteration
+    ## to pick the best number of trees
+    n.trees = 1000,
+    interaction.depth = hyper_grid$interaction.depth[i],
+    shrinkage = hyper_grid$shrinkage[i],
+    ## this fits the model on a 80% training sample
+    train.fraction = .8,
+    verbose = FALSE
+  )
+  
+  # the valid.error object output by gbm will give us
+  # the test set RMSE for each iteration (each number of trees up to 1000)
+  # so we can use the following to store test RMSE and the corresponding best number of trees
+  hyper_grid$min_RMSE[i] <- sqrt(min(gbm.PHQ9$valid.error))
+  hyper_grid$best_ntrees[i] <- which.min(gbm.PHQ9$valid.error)
+}
+
+## let's see which combination of parameters gives lowest RMSE
+hyper_grid[which.min(hyper_grid$min_RMSE),]
+```
+
+#### Do boosting for LSNS6
+```{r}
+
+# loop through all combos of hyperparameters
+# this will take a minute or two to run
+for(i in 1:nrow(hyper_grid)) {
+  
+  # reproducibility
+  set.seed(123)
+  
+  # train model
+  gbm.LSNS6 <- gbm(
+    formula = LSNS6~.-K6 -PHQ9 -UCLA_LS3 -Income -ID-Age,
+    distribution = "bernoulli",
+    data = distress,
+    ## specify a maximum number of trees and we can evaluate model fit at each iteration
+    ## to pick the best number of trees
+    n.trees = 1000,
+    interaction.depth = hyper_grid$interaction.depth[i],
+    shrinkage = hyper_grid$shrinkage[i],
+    ## this fits the model on a 80% training sample
+    train.fraction = .8,
+    verbose = FALSE
+  )
+  
+  # the valid.error object output by gbm will give us
+  # the test set RMSE for each iteration (each number of trees up to 1000)
+  # so we can use the following to store test RMSE and the corresponding best number of trees
+  hyper_grid$min_RMSE[i] <- sqrt(min(gbm.LSNS6$valid.error))
+  hyper_grid$best_ntrees[i] <- which.min(gbm.LSNS6$valid.error)
+}
+
+## let's see which combination of parameters gives lowest RMSE
+hyper_grid[which.min(hyper_grid$min_RMSE),]
+```
+
+#### Do boosting for K6
+```{r}
+
+# loop through all combos of hyperparameters
+# this will take a minute or two to run
+for(i in 1:nrow(hyper_grid)) {
+  
+  # reproducibility
+  set.seed(123)
+  
+  # train model
+  gbm.K6 <- gbm(
+    formula = K6~.-PHQ9 -LSNS6 -UCLA_LS3 -Income -ID-Age,
+    distribution = "bernoulli",
+    data = distress,
+    ## specify a maximum number of trees and we can evaluate model fit at each iteration
+    ## to pick the best number of trees
+    n.trees = 1000,
+    interaction.depth = hyper_grid$interaction.depth[i],
+    shrinkage = hyper_grid$shrinkage[i],
+    ## this fits the model on a 80% training sample
+    train.fraction = .8,
+    verbose = FALSE
+  )
+  
+  # the valid.error object output by gbm will give us
+  # the test set RMSE for each iteration (each number of trees up to 1000)
+  # so we can use the following to store test RMSE and the corresponding best number of trees
+  hyper_grid$min_RMSE[i] <- sqrt(min(gbm.K6$valid.error))
+  hyper_grid$best_ntrees[i] <- which.min(gbm.K6$valid.error)
+}
+
+## let's see which combination of parameters gives lowest RMSE
+hyper_grid[which.min(hyper_grid$min_RMSE),]
+```
+
+
+
+
